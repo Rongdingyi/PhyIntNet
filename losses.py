@@ -43,12 +43,12 @@ class CharbonnierLoss(nn.Module):
         super(CharbonnierLoss, self).__init__()
         self.eps = eps
         self.fl = PerceptualLoss([2,2,2], [0.6,0.3,0.1])
-        self.mse = torch.nn.MSELoss()
-    def forward(self, x, y):
+        self.l1 = torch.nn.L1Loss()
+    def forward(self, x, y, mask):
         diff = x - y
         # loss = torch.sum(torch.sqrt(diff * diff + self.eps))
         # loss = torch.mean(torch.sqrt((diff * diff) + (self.eps*self.eps))) + self.fl(x,y)
-        loss = self.mse(x*mask,y*mask)
+        loss = self.l1(x*mask,y*mask)
         return loss
 
 class MaskLoss(nn.Module):

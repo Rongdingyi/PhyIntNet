@@ -9,8 +9,7 @@ from einops.layers.torch import Rearrange
 import math
 import numpy as np
 from torch.autograd import Variable
-from resnet import resnet50
-
+import resnet
 
 class PicPrecoding(nn.Module):
     def __init__(self, in_channel=3, out_channel=64, kernel_size=3, stride=1, norm_layer=None,act_layer=nn.LeakyReLU):
@@ -34,68 +33,14 @@ class PicPrecoding(nn.Module):
         x = self.encoder(x).flatten(2).transpose(1, 2).contiguous()  # B H*W C
         if self.norm is not None:
             x = self.norm(x)
-        B, L, C = x.shape
-        H = int(math.sqrt(L))
-        W = int(math.sqrt(L))
-        y = x.transpose(1, 2).view(B, C, H, W)
-        y = self.decoder(y)
-        if self.norm is not None:
-            y = self.norm(y)
-        return x, y
-
-
-class Precoding(nn.Module):
-    def __init__(self, in_channel=3, out_channel=64, kernel_size=3, stride=1, norm_layer=None,act_layer=nn.LeakyReLU):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(in_channel, 8, kernel_size=3, stride=stride, padding=kernel_size//2),
-            nn.BatchNorm2d(8),
-            act_layer(inplace=True),
-            nn.Conv2d(8, 16, kernel_size=3, stride=stride, padding=kernel_size//2),
-            nn.BatchNorm2d(16),
-            act_layer(inplace=True),
-            nn.Conv2d(16, out_channel, kernel_size=3, stride=stride, padding=kernel_size//2),
-            nn.BatchNorm2d(out_channel),
-            act_layer(inplace=True)
-        )
-        # self.en_fc = nn.Linear(128*128*out_channel, 128*128*out_channel)
-        # self.de_fc = nn.Linear(128*128*out_channel, 128*128*out_channel)
-        self.decoder = nn.Sequential(
-            nn.Conv2d(out_channel, in_channel, kernel_size=3, stride=stride, padding=kernel_size//2)
-            # nn.BatchNorm2d(16),
-            # act_layer(inplace=True),
-            # nn.Conv2d(16, 8, kernel_size=3, stride=stride, padding=kernel_size//2),
-            # nn.BatchNorm2d(8),
-            # act_layer(inplace=True),
-            # nn.Conv2d(8, in_channel, kernel_size=3, stride=stride, padding=kernel_size//2),
-            # nn.BatchNorm2d(in_channel),
-            # act_layer(inplace=True)
-        )
-        if norm_layer is not None:
-            self.norm = norm_layer(out_channel)
-        else:
-            self.norm = None
-        self.in_channel = in_channel
-        self.out_channel = out_channel
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        code = self.encoder(x).flatten(2).transpose(1, 2).contiguous()  # B H*W C
-        # x = self.en_fc(x.view(x.size(0), -1))
-        # code = x.view(B, C * H, W)
-        # if self.norm is not None:.flatten(2).transpose(1, 2).contiguous()
-        #     x = self.norm(x)
-        B, L, C = code.shape
-        # de = self.de_fc(x)
-        H = int(math.sqrt(L))
-        W = int(math.sqrt(L))
-        y = code.transpose(1, 2).view(B, C, H, W)
-        y = self.decoder(y)
-        if self.norm is not None:
-            y = self.norm(y)
-        return code, y
-
-
+        # B, L, C = x.shape
+        # H = int(math.sqrt(L))
+        # W = int(math.sqrt(L))
+        # y = x.transpose(1, 2).view(B, C, H, W)
+        # y = self.decoder(y)
+        # if self.norm is not None:
+        #     y = self.norm(y)
+        return x   
 
 class PositionalEncoding(nn.Module):
     "Implement the PE function."
@@ -442,26 +387,24 @@ class LinearProjection1(nn.Module):
         super().__init__()
         inner_dim = dim_head *  heads
         self.heads = heads
-        self.to_qvq = nn.Linear(dim, inner_dim * 2, bias = bias)
-        self.to_kvk = nn.Linear(dim, inner_dim * 2, bias = bias)
-        self.to_v = nn.Linear(dim, inner_dim, bias = bias)
+        self.to_q = nn.Linear(dim, inner_dim, bias = bias)
+        self.to_kv = nn.Linear(dim, inner_dim * 2, bias = bias)
         self.dim = dim
         self.inner_dim = inner_dim
 
-    def forward(self, x, attn_kv=None):
+    def forward(self, x, force, attn_kv=None):
         B_, N, C = x.shape
         if attn_kv is not None:
             attn_kv = attn_kv.unsqueeze(0).repeat(B_,1,1)
         else:
             attn_kv = x
         N_kv = attn_kv.size(1)
-        qvq = self.to_qvq(attn_kv).reshape(B_, N_kv, 2, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
-        kvk = self.to_kvk(attn_kv).reshape(B_, N_kv, 2, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
-        v = self.to_v(x).reshape(B_, N, 1, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
-        q, vq = qvq[0], qvq[1] 
-        k, vk = kvk[0], kvk[1] 
-        v = v[0]
-        return q, vq, k, vk, v
+        q = self.to_q(force)
+        q = q.reshape(B_, N, 1, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
+        kv = self.to_kv(attn_kv).reshape(B_, N_kv, 2, self.heads, C // self.heads).permute(2, 0, 3, 1, 4)
+        q = q[0]
+        k, v = kv[0], kv[1] 
+        return q,k,v
 
     def flops(self, q_L, kv_L=None): 
         kv_L = kv_L or q_L
@@ -518,9 +461,14 @@ class WindowAttention(nn.Module):
         B_, N, C = x.shape
         q, k, v = self.qkv(x,attn_kv)
         q = q * self.scale
-
-
-        attn = (q @ k.transpose(-2, -1))
+        if self.qk_mode == 'dot':
+            attn = (q @ k.transpose(-2, -1))
+        elif self.qk_mode == 'dist-2':
+            q_map = q.unsqueeze(-2)
+            k_map = k.unsqueeze(-3)
+            dist = torch.norm(q_map-k_map, dim=-1)
+            attn = torch.exp(torch.pow(-dist*dist-1, -1))
+        # attn = (q @ k.transpose(-2, -1))
 
 
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
@@ -541,7 +489,7 @@ class WindowAttention(nn.Module):
         else:
             attn = self.softmax(attn)
             # attn = attn
-    # np.savez('attn'+str(B_+N+C),attn.cpu().detach().numpy())
+
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
@@ -573,8 +521,7 @@ class WindowAttention(nn.Module):
         print("W-MSA:{%.2f}"%(flops/1e9))
         return flops
 
-
-class WindowAttention1(nn.Module):
+class WindowCrossAttention(nn.Module):
     def __init__(self, dim, win_size,num_heads, token_projection='linear', qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0., qk_mode='dot'):
 
         super().__init__()
@@ -602,122 +549,58 @@ class WindowAttention1(nn.Module):
         relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
         self.register_buffer("relative_position_index", relative_position_index)
         trunc_normal_(self.relative_position_bias_table, std=.02)
-        self.embb = nn.Linear(dim, 5)
+            
         if token_projection =='conv':
             self.qkv = ConvProjection(dim,num_heads,dim//num_heads,bias=qkv_bias)
-            self.embq = nn.Linear(dim, dim)
-            self.embk = nn.Linear(dim, 2 * dim)
-            # self.embqkv = ConvProjection(dim,num_heads,dim//num_heads,bias=qkv_bias)
         elif token_projection =='linear':
             self.qkv = LinearProjection1(dim,num_heads,dim//num_heads,bias=qkv_bias)
-            self.embq = nn.Linear(dim, dim)
-            self.embk = nn.Linear(dim, 2 * dim)
-            # self.embqkv = LinearProjection(dim,num_heads,dim//num_heads,bias=qkv_bias)
         else:
             raise Exception("Projection error!") 
         
         self.token_projection = token_projection
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
+        self.proj1 = nn.Linear(64, 32)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.softmax = nn.Softmax(dim=-1)
-        self.softmax1 = nn.Softmax()
         # self.softmax = nn.Sigmoid()
 
-    def forward(self, x, LBPen0, attn_kv=None, mask=None):
-        # weight = torch.rand(5)
-        # weight = Variable(weight,requires_grad=True)
-        weight = self.embb(x)
-        weight = weight.sum(axis = 0)
-        weight = weight.sum(axis = 0)
-        # print(weight)
-        weight = weight/1000
-        weight = self.softmax1(weight)
-        # print(weight)
-        # print(weight.shape)
+    def forward(self, x, force, attn_kv=None, mask=None):
         B_, N, C = x.shape
-        # print(B_, N, C)
-        q, vq, k, vk, v= self.qkv(x,attn_kv)
+        # x, force = x[:,:,:C//2], x[:,:,C//2:]
+        q, k, v = self.qkv(x,force,attn_kv)
         q = q * self.scale
-        vq = vq * self.scale
-        LBPen0 = LBPen0.unsqueeze(1)
-        LBPen0 = self.embk(LBPen0)
-        q_map = q.unsqueeze(-2)
-        k_map = k.unsqueeze(-3)
-        value_q_map = vq.unsqueeze(-2)
-        value_k_map = vk.unsqueeze(-3)
-        dist = torch.norm(q_map-k_map, dim=-1)
-        value_dist = torch.norm(value_q_map-value_k_map, dim=-1)
-        attn = torch.exp(torch.pow(-dist*dist-1, -2)) * torch.exp(torch.pow(-value_dist*value_dist-1,-2))
-        attn1 = (q @ k.transpose(-2, -1))
-        attn2 = torch.pow(q @ k.transpose(-2, -1), 2)
-        attn3 = torch.pow(dist + 1, -3)
-        attn4 = torch.pow(dist + 1, -1)
-        # attn4 = (q @ q.transpose(-2, -1) - k @ k.transpose(-2, -1))
-        # print(attn.shape, attn1.shape, attn2.shape, attn3.shape, attn4.shape)torch.pow(q @ k.transpose(-2, -1), -1)
-# 
-        # attn = torch.pow(-dist*dist-1, -1) + torch.pow(-value_dist*value_dist-1,-1)
-        # attn = torch.exp(torch.pow(dist*dist+1, -1)) @ torch.exp(torch.pow(value_dist*value_dist+1,-1))
+        attn = (q @ k.transpose(-2, -1))
+
+
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.win_size[0] * self.win_size[1], self.win_size[0] * self.win_size[1], -1)  # Wh*Ww,Wh*Ww,nH
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww/ torch.from_numpy(np.array(np.sqrt(2)))
         ratio = attn.size(-1)//relative_position_bias.size(-1)
         relative_position_bias = repeat(relative_position_bias, 'nH l c -> nH l (c d)', d = ratio)
-    
-        # attn = attn + relative_position_bias.unsqueeze(0)
-        # print(x.shape, LBPen0.shape)
-        BA, CA, HA, WA = attn.shape
-        LBPen0 = LBPen0.view(BA, CA, HA, WA)
+        attn = attn + relative_position_bias.unsqueeze(0)
+        # attn = attn.squeeze(1)
         if mask is not None:
             nW = mask.shape[0]
             mask = repeat(mask, 'nW m n -> nW m (n d)',d = ratio)
             attn = attn.view(B_ // nW, nW, self.num_heads, N, N*ratio) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N*ratio)
-            attn = self.softmax(attn+LBPen0)
-
-            attn1 = attn1.view(B_ // nW, nW, self.num_heads, N, N*ratio) + mask.unsqueeze(1).unsqueeze(0)
-            attn1 = attn1.view(-1, self.num_heads, N, N*ratio)
-            attn1 = self.softmax(attn1+LBPen0)
-
-            attn2 = attn2.view(B_ // nW, nW, self.num_heads, N, N*ratio) + mask.unsqueeze(1).unsqueeze(0)
-            attn2 = attn2.view(-1, self.num_heads, N, N*ratio)
-            attn2 = self.softmax(attn2+LBPen0)
-
-            attn3 = attn3.view(B_ // nW, nW, self.num_heads, N, N*ratio) + mask.unsqueeze(1).unsqueeze(0)
-            attn3 = attn3.view(-1, self.num_heads, N, N*ratio)
-            attn3 = self.softmax(attn3+LBPen0)
-
-            attn4 = attn4.view(B_ // nW, nW, self.num_heads, N, N*ratio) + mask.unsqueeze(1).unsqueeze(0)
-            attn4 = attn4.view(-1, self.num_heads, N, N*ratio)
-            attn4 = self.softmax(attn4+LBPen0)
+            # attn = self.softmax(attn)
+            # attn = attn
         else:
-            attn = self.softmax(attn+LBPen0)
-            attn1 = self.softmax(attn1+LBPen0)
-            attn2 = self.softmax(attn2+LBPen0)
-            attn3 = self.softmax(attn3+LBPen0)
-            attn4 = self.softmax(attn4+LBPen0)
+            # attn = self.softmax(attn)
+            attn = attn
 
-
-
-        # sum_attn = torch.sum(attn, dim=0)
-        # sum_attn = sum_attn.unsqueeze(0)
-        # sum_attn = torch.sum(sum_attn, dim=0)
-        # np.savez('attn'+str(C),attn.cpu().detach().numpy())
-        # print(attn.shape)
         attn = self.attn_drop(attn)
-        attn1 = self.attn_drop(attn1)
-        attn2 = self.attn_drop(attn2)
-        attn3 = self.attn_drop(attn3)
-        attn4 = self.attn_drop(attn4)
-        # print(weight)
-        attn = weight[0] * attn + weight[1] * attn1 + weight[2] * attn2 + weight[3] * attn3 + weight[4] * attn4
-        w = weight.cpu().detach().numpy()
-        with open('/data1/rong/code/Eyes/source_first_dist_mae/weight.txt','a') as f:
-            f.write(str(w[0])+','+str(w[1])+','+str(w[2])+','+str(w[3])+','+str(w[4])+'\n')
-        # print(attn.numpy(),attn_score.size(),seq_len)
-        
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        a,b,c,d = attn.shape
+        attn = attn.reshape(a*b,c,d)
+        # print(attn.shape)
+        attn = self.proj1(attn)
+        attn = attn.reshape(a,b,c,d // 2)
+        # print(attn.shape)
+        x = (attn + v).transpose(1, 2).reshape(B_, N, C)
+        # print(x.shape)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -745,7 +628,6 @@ class WindowAttention1(nn.Module):
         flops += nW * N * self.dim * self.dim
         print("W-MSA:{%.2f}"%(flops/1e9))
         return flops
-
 
 ########### self-attention #############
 class Attention(nn.Module):
@@ -1011,45 +893,6 @@ class InputProj(nn.Module):
         print("Input_proj:{%.2f}"%(flops/1e9))
         return flops
 
-class LENProj(nn.Module):
-    def __init__(self, in_channel=3, out_channel=64, kernel_size=3, stride=1, norm_layer=None,act_layer=nn.LeakyReLU):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Conv2d(in_channel, out_channel/16, kernel_size=3, stride=stride, padding=kernel_size//2),
-            act_layer(inplace=True),
-            nn.Conv2d(in_channel, out_channel/8, kernel_size=3, stride=stride, padding=kernel_size//2),
-            act_layer(inplace=True),
-            nn.Conv2d(in_channel, out_channel/4, kernel_size=3, stride=stride, padding=kernel_size//2),
-            act_layer(inplace=True),
-            nn.Conv2d(in_channel, out_channel/2, kernel_size=3, stride=stride, padding=kernel_size//2),
-            act_layer(inplace=True),
-            nn.Conv2d(in_channel, out_channel, kernel_size=3, stride=stride, padding=kernel_size//2),
-            act_layer(inplace=True),
-        )
-        if norm_layer is not None:
-            self.norm = norm_layer(out_channel)
-        else:
-            self.norm = None
-        self.in_channel = in_channel
-        self.out_channel = out_channel
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x = self.proj(x).flatten(2).transpose(1, 2).contiguous()  # B H*W C
-        if self.norm is not None:
-            x = self.norm(x)
-        return x
-
-    def flops(self, H, W):
-        flops = 0
-        # conv
-        flops += H*W*self.in_channel*self.out_channel*3*3
-
-        if self.norm is not None:
-            flops += H*W*self.out_channel 
-        print("Input_proj:{%.2f}"%(flops/1e9))
-        return flops
-
 # Output Projection
 class OutputProj(nn.Module):
     def __init__(self, in_channel=64, out_channel=3, kernel_size=3, stride=1, norm_layer=None,act_layer=None):
@@ -1249,7 +1092,7 @@ class LeWinTransformerBlock(nn.Module):
         return flops
 
 
-class LeWinTransformerBlock1(nn.Module):
+class LeWinCrossTransformerBlock(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, win_size=8, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm,token_projection='linear',token_mlp='leff',
@@ -1281,7 +1124,7 @@ class LeWinTransformerBlock1(nn.Module):
             self.cross_modulator = None
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention1(
+        self.attn = WindowCrossAttention(
             dim, win_size=to_2tuple(self.win_size), num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
             token_projection=token_projection, qk_mode=qk_mode)
@@ -1307,9 +1150,8 @@ class LeWinTransformerBlock1(nn.Module):
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
                f"win_size={self.win_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio},modulator={self.modulator}"
 
-    def forward(self, x, LBPen0, mask=None):
+    def forward(self, x, force, mask=None):
         B, L, C = x.shape
-        # print(x.shape, LBPen0.shape)
         H = int(math.sqrt(L))
         W = int(math.sqrt(L))
         
@@ -1354,31 +1196,33 @@ class LeWinTransformerBlock1(nn.Module):
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
-        LBPen0 = LBPen0.view(B, H, W, C)
+        force = self.norm1(force)
+        force = force.view(B, H, W, C)
+
         # cyclic shift
         if self.shift_size > 0:
             shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
-            shifted_LBPen0 = torch.roll(LBPen0, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+            shifted_force = torch.roll(force, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
             shifted_x = x
-            shifted_LBPen0 = LBPen0
+            shifted_force = force
 
         # partition windows
         x_windows = window_partition(shifted_x, self.win_size)  # nW*B, win_size, win_size, C  N*C->C
         x_windows = x_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
-        lbp_windows = window_partition(shifted_LBPen0, self.win_size)  # nW*B, win_size, win_size, C  N*C->C
-        lbp_windows = lbp_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
+        force_windows = window_partition(shifted_force, self.win_size)  # nW*B, win_size, win_size, C  N*C->C
+        force_windows = force_windows.view(-1, self.win_size * self.win_size, C)  # nW*B, win_size*win_size, C
 
         # with_modulator
         if self.modulator is not None:
             wmsa_in = self.with_pos_embed(x_windows,self.modulator.weight)
-            wlbp = self.with_pos_embed(lbp_windows,self.modulator.weight)
+            force_in = self.with_pos_embed(force_windows,self.modulator.weight)
         else:
             wmsa_in = x_windows
-            wlbp = lbp_windows
+            force_in = force_windows
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(wmsa_in,wlbp, mask=attn_mask)  # nW*B, win_size*win_size, C
+        attn_windows = self.attn(wmsa_in, force_in, mask=attn_mask)  # nW*B, win_size*win_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.win_size, self.win_size, C)
@@ -1415,7 +1259,6 @@ class LeWinTransformerBlock1(nn.Module):
         flops += self.mlp.flops(H,W)
         # print("LeWin:{%.2f}"%(flops/1e9))
         return flops
-
 
 #########################################
 ########### Basic layer of Uformer ################
@@ -1473,8 +1316,8 @@ class BasicUformerLayer(nn.Module):
         for blk in self.blocks:
             flops += blk.flops()
         return flops
-
-class BasicUformerLayer1(nn.Module):
+    
+class CrossUformerLayer(nn.Module):
     def __init__(self, dim, output_dim, input_resolution, depth, num_heads, win_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint=False,
@@ -1489,7 +1332,7 @@ class BasicUformerLayer1(nn.Module):
         # build blocks
         if shift_flag:
             self.blocks = nn.ModuleList([
-                LeWinTransformerBlock1(dim=dim, input_resolution=input_resolution,
+                LeWinCrossTransformerBlock(dim=dim, input_resolution=input_resolution,
                                     num_heads=num_heads, win_size=win_size,
                                     shift_size=0 if (i % 2 == 0) else win_size // 2,
                                     mlp_ratio=mlp_ratio,
@@ -1501,7 +1344,7 @@ class BasicUformerLayer1(nn.Module):
                 for i in range(depth)])
         else:
             self.blocks = nn.ModuleList([
-                LeWinTransformerBlock1(dim=dim, input_resolution=input_resolution,
+                LeWinCrossTransformerBlock(dim=dim, input_resolution=input_resolution,
                                     num_heads=num_heads, win_size=win_size,
                                     shift_size=0,
                                     mlp_ratio=mlp_ratio,
@@ -1515,13 +1358,12 @@ class BasicUformerLayer1(nn.Module):
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"    
 
-    def forward(self, x, LBPen0, mask=None):
+    def forward(self, x, force, mask=None):
         for blk in self.blocks:
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
             else:
-                # print(x.shape)
-                x = blk(x,LBPen0,mask)
+                x = blk(x,force,mask)
         return x
 
     def flops(self):
@@ -1529,7 +1371,6 @@ class BasicUformerLayer1(nn.Module):
         for blk in self.blocks:
             flops += blk.flops()
         return flops
-
 
 class Uformer(nn.Module):
     def __init__(self, img_size=256, out_chans=1,
@@ -1539,7 +1380,7 @@ class Uformer(nn.Module):
                  norm_layer=nn.LayerNorm, patch_norm=True,
                  use_checkpoint=False, token_projection='linear', token_mlp='leff',
                  dowsample=Downsample, upsample=Upsample, shift_flag=True, modulator=False, 
-                 cross_modulator=False, use_LENmu=False, time_encode=False, qk_mode='dot', predict_AL=False):
+                 cross_modulator=False, precoding=PicPrecoding, use_LENmu=False, time_encode=False, qk_mode='dist-2', predict_AL=False):
         super().__init__()
 
         self.num_enc_layers = len(depths)//2
@@ -1552,11 +1393,12 @@ class Uformer(nn.Module):
         self.win_size =win_size
         self.reso = img_size
         self.pos_drop = nn.Dropout(p=drop_rate)
+        self.precoding = precoding
         self.use_LENmu = use_LENmu
         self.time_encode = time_encode
         self.predict_AL = predict_AL
         if not use_LENmu and not time_encode:
-            self.dd_in = 5
+            self.dd_in = 3
             self.len_dd = 0
         elif use_LENmu and not time_encode:
             self.dd_in = 4
@@ -1579,24 +1421,36 @@ class Uformer(nn.Module):
 
         # Input/Output
         self.position_emb = PositionalEncoding(d_model=32, dropout=drop_rate, max_len = 16384)
+        self.time_emb = PositionalEncoding(d_model=32, dropout=drop_rate, max_len = 16384)
         self.input_proj = InputProj(in_channel=self.dd_in, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
-        self.lbp_proj = InputProj(in_channel=1, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
         self.output_proj = OutputProj(in_channel=2*embed_dim, out_channel=self.in_chans, kernel_size=3, stride=1)
         self.avgpool = nn.AdaptiveAvgPool1d(1)  # output size = (1, 1)，自适应平均池化下采样
         
         if self.use_LENmu:
-            self.LEN_proj = LENProj(in_channel=self.len_dd, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
-        
-        # if self.predict_AL:
+            self.LEN_proj = InputProj(in_channel=self.len_dd, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
+            self.LEN_proj1 = InputProj(in_channel=self.len_dd, out_channel=embed_dim, kernel_size=3, stride=1, act_layer=nn.LeakyReLU)
         if self.predict_AL:
-            self.fc2 = resnet50(1)
-            self.spar_input = nn.Sequential(nn.Linear(11, 99, bias=True))
-            self.len_pred = nn.Sequential(nn.ReLU(inplace=True),nn.Linear(100, 100, bias=True), nn.ReLU(inplace=True), 
-                                    nn.Linear(100, 50, bias=True), nn.ReLU(inplace=True), 
-                                    nn.Linear(50, 1, bias=True))
-
+            self.fc2 = resnet.resnet50(128)
+            self.spar_input = nn.Sequential(nn.Linear(8, 128))
+            self.len_pred = nn.Sequential(nn.Linear(256, 128), nn.LeakyReLU(inplace=True), 
+                                        nn.Linear(128, 64), nn.LeakyReLU(inplace=True), 
+                                        nn.Linear(64, 32), nn.LeakyReLU(inplace=True), nn.Linear(32, 1))
         # Encoder
-        self.encoderlayer_0 = BasicUformerLayer1(dim=embed_dim,
+        self.encoderlayer_0 = BasicUformerLayer(dim=embed_dim,
+                            output_dim=embed_dim,
+                            input_resolution=(img_size,
+                                                img_size),
+                            depth=depths[0],
+                            num_heads=num_heads[0],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=enc_dpr[sum(depths[:0]):sum(depths[:1])],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
+        self.encodercrosslayer_0 = CrossUformerLayer(dim=embed_dim,
                             output_dim=embed_dim,
                             input_resolution=(img_size,
                                                 img_size),
@@ -1611,10 +1465,24 @@ class Uformer(nn.Module):
                             use_checkpoint=use_checkpoint,
                             token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
         if self.use_LENmu:
-            self.dowsample_0 = dowsample(embed_dim*2, embed_dim*2)
+            self.dowsample_0 = dowsample(embed_dim, embed_dim*2)
         else:
             self.dowsample_0 = dowsample(embed_dim, embed_dim*2)
-        self.encoderlayer_1 = BasicUformerLayer1(dim=embed_dim*2,
+        self.encoderlayer_1 = BasicUformerLayer(dim=embed_dim*2,
+                            output_dim=embed_dim*2,
+                            input_resolution=(img_size // 2,
+                                                img_size // 2),
+                            depth=depths[1],
+                            num_heads=num_heads[1],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=enc_dpr[sum(depths[:1]):sum(depths[:2])],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
+        self.encodercrosslayer_1 = CrossUformerLayer(dim=embed_dim*2,
                             output_dim=embed_dim*2,
                             input_resolution=(img_size // 2,
                                                 img_size // 2),
@@ -1630,10 +1498,24 @@ class Uformer(nn.Module):
                             token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
         if self.use_LENmu:
             self.dowsample_LEN1 = dowsample(embed_dim, embed_dim*2)
-            self.dowsample_1 = dowsample(embed_dim*4, embed_dim*4)
+            self.dowsample_1 = dowsample(embed_dim*2, embed_dim*4)
         else:
             self.dowsample_1 = dowsample(embed_dim*2, embed_dim*4)
-        self.encoderlayer_2 = BasicUformerLayer1(dim=embed_dim*4,
+        self.encoderlayer_2 = BasicUformerLayer(dim=embed_dim*4,
+                            output_dim=embed_dim*4,
+                            input_resolution=(img_size // (2 ** 2),
+                                                img_size // (2 ** 2)),
+                            depth=depths[2],
+                            num_heads=num_heads[2],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=enc_dpr[sum(depths[:2]):sum(depths[:3])],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
+        self.encodercrosslayer_2 = CrossUformerLayer(dim=embed_dim*4,
                             output_dim=embed_dim*4,
                             input_resolution=(img_size // (2 ** 2),
                                                 img_size // (2 ** 2)),
@@ -1649,10 +1531,24 @@ class Uformer(nn.Module):
                             token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
         if self.use_LENmu:
             self.dowsample_LEN2 = dowsample(embed_dim*2, embed_dim*4)
-            self.dowsample_2 = dowsample(embed_dim*8, embed_dim*8)
+            self.dowsample_2 = dowsample(embed_dim*4, embed_dim*8)
         else:
             self.dowsample_2 = dowsample(embed_dim*4, embed_dim*8)
-        self.encoderlayer_3 = BasicUformerLayer1(dim=embed_dim*8,
+        self.encoderlayer_3 = BasicUformerLayer(dim=embed_dim*8,
+                            output_dim=embed_dim*8,
+                            input_resolution=(img_size // (2 ** 3),
+                                                img_size // (2 ** 3)),
+                            depth=depths[3],
+                            num_heads=num_heads[3],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=enc_dpr[sum(depths[:3]):sum(depths[:4])],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
+        self.encodercrosslayer_3 = CrossUformerLayer(dim=embed_dim*8,
                             output_dim=embed_dim*8,
                             input_resolution=(img_size // (2 ** 3),
                                                 img_size // (2 ** 3)),
@@ -1668,7 +1564,7 @@ class Uformer(nn.Module):
                             token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,qk_mode=qk_mode)
         if self.use_LENmu:
             self.dowsample_LEN3 = dowsample(embed_dim*4, embed_dim*8)
-            self.dowsample_3 = dowsample(embed_dim*16, embed_dim*16)
+            self.dowsample_3 = dowsample(embed_dim*8, embed_dim*16)
             self.dowsample_LEN4 = dowsample(embed_dim*8, embed_dim*16)
         else:
             self.dowsample_3 = dowsample(embed_dim*8, embed_dim*16)
@@ -1691,9 +1587,25 @@ class Uformer(nn.Module):
 
         # Decoder
         if self.use_LENmu:
-            self.upsample_0 = upsample(embed_dim*32, embed_dim*8)
+            self.upsample_0 = upsample(embed_dim*16, embed_dim*8)
+            self.upsample_LEN0 = upsample(embed_dim*16, embed_dim*16)
         else:
             self.upsample_0 = upsample(embed_dim*16, embed_dim*8)
+        self.decodercrosslayer_0 = CrossUformerLayer(dim=embed_dim*16,
+                            output_dim=embed_dim*16,
+                            input_resolution=(img_size // (2 ** 3),
+                                                img_size // (2 ** 3)),
+                            depth=depths[5],
+                            num_heads=num_heads[5],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=dec_dpr[:depths[5]],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,
+                            modulator=modulator,cross_modulator=cross_modulator,qk_mode=qk_mode)
         self.decoderlayer_0 = BasicUformerLayer(dim=embed_dim*16,
                             output_dim=embed_dim*16,
                             input_resolution=(img_size // (2 ** 3),
@@ -1710,9 +1622,25 @@ class Uformer(nn.Module):
                             token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,
                             modulator=modulator,cross_modulator=cross_modulator,qk_mode=qk_mode)
         if self.use_LENmu:
-            self.upsample_1 = upsample(embed_dim*24, embed_dim*4)
+            self.upsample_1 = upsample(embed_dim*16, embed_dim*4)
+            self.upsample_LEN1 = upsample(embed_dim*16, embed_dim*8)
         else:
             self.upsample_1 = upsample(embed_dim*16, embed_dim*4)
+        self.decodercrosslayer_1 = CrossUformerLayer(dim=embed_dim*8,
+                            output_dim=embed_dim*8,
+                            input_resolution=(img_size // (2 ** 2),
+                                                img_size // (2 ** 2)),
+                            depth=depths[6],
+                            num_heads=num_heads[6],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=dec_dpr[sum(depths[5:6]):sum(depths[5:7])],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,
+                            modulator=modulator,cross_modulator=cross_modulator,qk_mode=qk_mode)
         self.decoderlayer_1 = BasicUformerLayer(dim=embed_dim*8,
                             output_dim=embed_dim*8,
                             input_resolution=(img_size // (2 ** 2),
@@ -1729,9 +1657,25 @@ class Uformer(nn.Module):
                             token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,
                             modulator=modulator,cross_modulator=cross_modulator,qk_mode=qk_mode)
         if self.use_LENmu:
-            self.upsample_2 = upsample(embed_dim*12, embed_dim*2)
+            self.upsample_2 = upsample(embed_dim*8, embed_dim*2)
+            self.upsample_LEN2 = upsample(embed_dim*8, embed_dim*4)
         else:
             self.upsample_2 = upsample(embed_dim*8, embed_dim*2)
+        self.decodercrosslayer_2 = CrossUformerLayer(dim=embed_dim*4,
+                            output_dim=embed_dim*4,
+                            input_resolution=(img_size // 2,
+                                                img_size // 2),
+                            depth=depths[7],
+                            num_heads=num_heads[7],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=dec_dpr[sum(depths[5:7]):sum(depths[5:8])],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,
+                            modulator=modulator,cross_modulator=cross_modulator,qk_mode=qk_mode)
         self.decoderlayer_2 = BasicUformerLayer(dim=embed_dim*4,
                             output_dim=embed_dim*4,
                             input_resolution=(img_size // 2,
@@ -1748,10 +1692,26 @@ class Uformer(nn.Module):
                             token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,
                             modulator=modulator,cross_modulator=cross_modulator,qk_mode=qk_mode)
         if self.use_LENmu:
-            self.upsample_3 = upsample(embed_dim*6, embed_dim)
+            self.upsample_3 = upsample(embed_dim*4, embed_dim)
+            self.upsample_LEN3 = upsample(embed_dim*4, embed_dim*2)
         else:
             self.upsample_3 = upsample(embed_dim*4, embed_dim)
-        self.decoderlayer_3 = BasicUformerLayer1(dim=embed_dim*2,
+        self.decoderlayer_3 = BasicUformerLayer(dim=embed_dim*2,
+                            output_dim=embed_dim*2,
+                            input_resolution=(img_size,
+                                                img_size),
+                            depth=depths[8],
+                            num_heads=num_heads[8],
+                            win_size=win_size,
+                            mlp_ratio=self.mlp_ratio,
+                            qkv_bias=qkv_bias, qk_scale=qk_scale,
+                            drop=drop_rate, attn_drop=attn_drop_rate,
+                            drop_path=dec_dpr[sum(depths[5:8]):sum(depths[5:9])],
+                            norm_layer=norm_layer,
+                            use_checkpoint=use_checkpoint,
+                            token_projection=token_projection,token_mlp=token_mlp,shift_flag=shift_flag,
+                            modulator=modulator,cross_modulator=cross_modulator,qk_mode=qk_mode)
+        self.decodercrosslayer_3 = CrossUformerLayer(dim=embed_dim*2,
                             output_dim=embed_dim*2,
                             input_resolution=(img_size,
                                                 img_size),
@@ -1797,18 +1757,13 @@ class Uformer(nn.Module):
 
         return decayed_len
 
-    #x: image, st:spars_with_timex, st
-    def forward(self, a, mask=None):
-        x = a[0]
-        st = a[1]
+    #x: image, st:spars_with_time
+    def forward(self, x, st, mask=None):
+        picencode = self.precoding(x[:,0:4,:,:])
         if self.use_LENmu:
             # Input Projection
-            y = self.input_proj(x[:,0:self.dd_in,:,:])
-            LBPen = self.lbp_proj(x[:,-2:-1,:,:])
-            # y = picencode
+            y = picencode
             m = self.position_emb(y)
-            # print(m.shape)
-            
             y = self.pos_drop(y) + m
             if self.time_encode:
                 decayed_len = self.gen_decayed_len_with_time(x[:,4:5,:,:], st[:,0:1])
@@ -1817,64 +1772,54 @@ class Uformer(nn.Module):
             else:
                 LEN_y = self.LEN_proj(x[:,4:5,:,:])
             LEN_y = self.pos_drop(LEN_y)
-            LBPen0 = self.pos_drop(LBPen)
             #Encoder
-            # print(y.shape, LBPen0.shape)
-            conv0 = self.encoderlayer_0(y,LBPen0,mask=mask)
-            LEN0 = torch.concat([conv0, LEN_y], dim = 2)
-            pool0 = self.dowsample_0(LEN0)
-            conv1 = self.encoderlayer_1(pool0,mask=mask)
+            conv0 = self.encodercrosslayer_0(y, LEN_y,mask=mask)
+            conv0 = self.encoderlayer_0(conv0,mask=mask)
+
+            pool0 = self.dowsample_0(conv0)
             LEN_y1 = self.dowsample_LEN1(LEN_y)
-            LBPen1 = self.dowsample_LEN1(LBPen0)
-            LEN1 = torch.concat([conv1, LEN_y1], dim = 2)
-            pool1 = self.dowsample_1(LEN1)
-            conv2 = self.encoderlayer_2(pool1,mask=mask)
+            conv1 = self.encodercrosslayer_1(pool0, LEN_y1,mask=mask)
+            conv1 = self.encoderlayer_1(conv1,mask=mask)
+
+            pool1 = self.dowsample_1(conv1)
             LEN_y2 = self.dowsample_LEN2(LEN_y1)
-            LBPen2 = self.dowsample_LEN2(LBPen1)
-            LEN2 = torch.concat([conv2, LEN_y2], dim = 2)
-            pool2 = self.dowsample_2(LEN2)
-            conv3 = self.encoderlayer_3(pool2,mask=mask)
-            LEN_y3 = self.dowsample_LEN3(LEN_y2) #[B, 256, 256]
-            LBPen3 = self.dowsample_LEN3(LBPen2)
-            LEN3 = torch.concat([conv3, LEN_y3], dim = 2)
-            pool3 = self.dowsample_3(LEN3)
+            conv2 = self.encodercrosslayer_2(pool1, LEN_y2,mask=mask)
+            conv2 = self.encoderlayer_2(conv2,mask=mask)
+
+            pool2 = self.dowsample_2(conv2)
+            LEN_y3 = self.dowsample_LEN3(LEN_y2)
+            conv3 = self.encodercrosslayer_3(pool2, LEN_y3,mask=mask)
+            conv3 = self.encoderlayer_3(conv3,mask=mask)
+            pool3 = self.dowsample_3(conv3)
             
+            LEN_y4 = self.dowsample_LEN4(LEN_y3)
             # Bottleneck
             conv4 = self.conv(pool3, mask=mask) #[B, 64, 512]
-            LEN_y4 = self.dowsample_LEN4(LEN_y3)
-            LBPen4 = self.dowsample_LEN4(LBPen3)
-            LEN4 = torch.concat([conv4, LEN_y4], dim = 2)
             
-            up0 = self.upsample_0(LEN4)
+            up0 = self.upsample_0(conv4)
             deconv0 = torch.cat([up0,conv3],-1)
             deconv0 = self.decoderlayer_0(deconv0,mask=mask)
-            LEN5 = torch.concat([deconv0, LEN_y3], dim = 2)
-
-            up1 = self.upsample_1(LEN5)
+            
+            up1 = self.upsample_1(deconv0)
             deconv1 = torch.cat([up1,conv2],-1)
             deconv1 = self.decoderlayer_1(deconv1,mask=mask)
-            LEN6 = torch.concat([deconv1, LEN_y2], dim = 2)
 
-            up2 = self.upsample_2(LEN6)
+            up2 = self.upsample_2(deconv1)
             deconv2 = torch.cat([up2,conv1],-1)
             deconv2 = self.decoderlayer_2(deconv2,mask=mask)
-            LEN7 = torch.concat([deconv2, LEN_y1], dim = 2)
 
-            up3 = self.upsample_3(LEN7)
+            up3 = self.upsample_3(deconv2)
             deconv3 = torch.cat([up3,conv0],-1)
-            LBPen0 = torch.cat([LBPen0,LBPen0],-1)
-            deconv3 = self.decoderlayer_3(deconv3,LBPen0,mask=mask)
+            deconv3 = self.decoderlayer_3(deconv3,mask=mask)
 
         else:
-            # Input Projection
             if self.time_encode:
-                decayed_len = self.gen_decayed_len_with_time(x[:,4:5,:,:], st[:,0:1])
-                merge = torch.concat([x[:,0:self.dd_in-1,:,:], decayed_len], dim = 1)
-                y = self.input_proj(merge)
+                time = self.position_emb(st[:,0:1])
+                y = self.input_proj(x[:,0:self.dd_in,:,:])
+                y = self.pos_drop(y) + time
             else:
                 y = self.input_proj(x[:,0:self.dd_in,:,:])
-            y = self.pos_drop(y)
-
+                y = self.pos_drop(y)
             #Encoder
             conv0 = self.encoderlayer_0(y,mask=mask)
             pool0 = self.dowsample_0(conv0)
@@ -1909,12 +1854,11 @@ class Uformer(nn.Module):
         y = self.output_proj(deconv3)
         out = x[:,0:self.in_chans,:,:] + y
 
-        # length prediction
         if self.predict_AL:
             img_f = self.fc2(out)
             spar_f = self.spar_input(st)
             merge_f = torch.concat([img_f, spar_f], dim=1)
-            length = self.len_pred(merge_f)
+            length = self.len_pred(merge_f)   
             return out, length
         else:
             return out

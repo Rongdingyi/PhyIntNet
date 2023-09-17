@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 import torch
 
 import sys
-sys.path.append('./source')
+sys.path.append('..')
 
 from utils import is_png_file, load_img, Augment_RGB_torch
 from copy import deepcopy
@@ -17,7 +17,7 @@ from skimage.transform import resize
 import skimage.feature
 import skimage.segmentation
 import cv2
-from sklearn.preprocessing import StandardScaler
+
 augment   = Augment_RGB_torch()
 transforms_aug = [method for method in dir(augment) if callable(getattr(augment, method)) if not method.startswith('_')] 
 
@@ -100,15 +100,15 @@ def processmergematrix(sixmonths, baseline, lens_in, mask):
 
     sixmonths = np.delete(sixmonths, idx_row, axis = 1)
     baseline = np.delete(baseline, idx_row, axis = 1)
-    lens_in = np.delete(lens_in, idx_row, axis = 1)
-    mask = np.delete(mask, idx_row, axis = 1)
 
     idx2_col = np.argwhere(np.all(matirx[...,:] == 0, axis = 1))
 
     sixmonths = np.delete(sixmonths, idx2_col, axis = 0)
     baseline = np.delete(baseline, idx2_col, axis = 0)
-    lens_in = np.delete(lens_in, idx2_col, axis = 0)
-    mask = np.delete(mask, idx2_col, axis = 0)
+
+    H, W, C = baseline.shape
+    lens_in = lens_in[(70 - H//2):(70 + H//2), (70 - W//2):(70 + W//2), :]
+    mask = mask[(70 - H//2):(70 + H//2), (70 - W//2):(70 + W//2), :]
 
     sixmonths = resize(sixmonths , (100,100))
     baseline = resize(baseline , (100,100))
@@ -122,13 +122,21 @@ def processmergematrix(sixmonths, baseline, lens_in, mask):
     lens_in = lens_in[(H//2 - 40):(H//2 + 40), (W//2 - 40):(W//2 + 40), :]
     mask = mask[(H//2 - 40):(H//2 + 40), (W//2 - 40):(W//2 + 40), :]
 
-    baseline[:,:,0] = (baseline[:,:,0] - 7) / (13 - 7)
-    baseline[:,:,1] = (baseline[:,:,1] - 5) / (15 - 5)
-    baseline[:,:,2] = (baseline[:,:,2] - 41) / (45 - 41)
+    # baseline[:,:,0] = (baseline[:,:,0] - 7) / (13 - 7)
+    # baseline[:,:,1] = (baseline[:,:,1] - 5) / (15 - 5)
+    # baseline[:,:,2] = (baseline[:,:,2] - 41) / (45 - 41)
 
-    sixmonths[:,:,0] = (sixmonths[:,:,0] - 7) / (13 - 7)
-    sixmonths[:,:,1] = (sixmonths[:,:,1] - 5) / (15 - 5)
-    sixmonths[:,:,2] = (sixmonths[:,:,2] - 41) / (45 - 41)
+    # sixmonths[:,:,0] = (sixmonths[:,:,0] - 7) / (13 - 7)
+    # sixmonths[:,:,1] = (sixmonths[:,:,1] - 5) / (15 - 5)
+    # sixmonths[:,:,2] = (sixmonths[:,:,2] - 41) / (45 - 41)
+
+    baseline[:,:,0] = (baseline[:,:,0] - 0) / 15
+    baseline[:,:,1] = (baseline[:,:,1] - 0) / 15
+    baseline[:,:,2] = (baseline[:,:,2] - 0) / 50
+
+    sixmonths[:,:,0] = (sixmonths[:,:,0] - 0) / 15
+    sixmonths[:,:,1] = (sixmonths[:,:,1] - 0) / 15
+    sixmonths[:,:,2] = (sixmonths[:,:,2] - 0) / 50
 
     sixmonths = resize(sixmonths , (128,128))
     baseline = resize(baseline , (128,128))
@@ -178,6 +186,17 @@ def load_raw_csv(filepath):
 def read_len_para(filename,  mode = 'origin'):
 
     dict_pre = {}
+    
+    # dict_['r_basic'] = 3
+    # dict_['T_basic'] = -0.3
+    # dict_['r_reverse'] = 0.5
+    # dict_['T_reverse'] = 0.6
+    # dict_['r_pos_1'] = 0.7
+    # dict_['T_pos_1'] = 0.2
+    # dict_['r_pos_2'] = 0.7
+    # dict_['T_pos_2'] = 0.1
+    # dict_['r_side'] = 0.3
+    # dict_['T_side'] = 0.05
 
     with open(filename, 'r') as f:
         for line in f:
@@ -251,18 +270,11 @@ def read_spar(filename):
         spl = line.split(',')
         arr = []
         for i in spl:
-            if i == '' or None:
-                i = 11.98
-            elif i == 'nan':
-                i = 24.95
             arr.append(float(i))
-        
+
     arr = np.array(arr)
-    arr[1] = arr[1] / 10
-    arr[2] = arr[2] / 11.98
-    arr[3] = arr[3] / 1000
-    arr[4] = arr[4] / 50
-    arr = arr[2:]
+
+    # print(arr)
 
     return arr
 
@@ -341,7 +353,7 @@ class Dataset_eye(Dataset):
         self.para_filenames = [os.path.join(csv_dir, 'base', x[1], 'Len_paras', 'v1.txt') for x in baseline_files]
         self.how_long_times = [int(x[0]) for x in baseline_files]
         self.AL_filenames = [os.path.join(csv_dir, 'after', x[0], x[1], 'Len_paras', 'AL.txt') for x in baseline_files]
-        self.spar_filenames = [os.path.join(csv_dir, 'spar_5', x[0], x[1]+'.txt') for x in baseline_files]
+        self.spar_filenames = [os.path.join(csv_dir, 'spar', x[0], x[1]+'.txt') for x in baseline_files]
 
         self.tar_size = len(self.sixmonths_filenames)  # get the size of target
         self.split = split
@@ -355,7 +367,7 @@ class Dataset_eye(Dataset):
         sixmonths = load_raw_csv(self.sixmonths_filenames[tar_index])
         baseline = load_raw_csv(self.baseline_filenames[tar_index])
         how_time_long = self.how_long_times[tar_index]
-
+        # LBP_baseline = skimage.feature.local_binary_pattern(baseline[:,:,0],8,1.0,method='default')       
         AL_filename = self.AL_filenames[tar_index]
 
         # if os.path.exists(AL_filename):
@@ -365,28 +377,16 @@ class Dataset_eye(Dataset):
         # else:
         #     sixAL = torch.zeros(1) - 1
 
-        with open(AL_filename, 'r') as fin:
-            sixAL = float(fin.readline())
-            sixAL = torch.from_numpy(np.array(np.float32(sixAL))[np.newaxis])
+        # with open(AL_filename, 'r') as fin:
+        #     sixAL = float(fin.readline())
+        sixAL = torch.from_numpy(np.array(24.75)[np.newaxis])
 
         spar_filename = self.spar_filenames[tar_index]
         spar_arr = read_spar(spar_filename)
-        # scale=StandardScaler()
-        # spar_arr=scale.fit_transform(spar_arr)
-        ### generate len and mask
         
+        ### generate len and mask
+
         paras = read_len_para(self.para_filenames[tar_index], self.len_mode)
-        if paras['r_reverse'] == 0.0:
-            spar_arr[-3] = 0.68
-        else:
-            spar_arr[-3] = paras['r_reverse']
-        if paras['r_pos_1'] + paras['r_pos_2'] == 0.0:
-            spar_arr[-4] = 1.23
-        else:
-            spar_arr[-4] = paras['r_pos_1'] + paras['r_pos_2']
-        # print(paras['r_reverse'])
-        # print(spar_arr)
-        # spar_arr[-3] = spar_arr[-3] +0.2
         lens, pix_of_per_length = gen_lens(paras)
         # lens_in = lens
         mask_pre = np.zeros_like(lens[:, :, 0:1])
@@ -399,16 +399,14 @@ class Dataset_eye(Dataset):
 
         sixmonths, baseline, lens_in, mask =\
             processmergematrix(sixmonths, baseline, lens_in, mask)
-
         sixmonths = torch.from_numpy(np.float32(sixmonths))        
         baseline = torch.from_numpy(np.float32(baseline))
         lens_in = torch.from_numpy(np.float32(lens_in))
         mask = torch.from_numpy(np.float32(mask))
         how_time_long = torch.from_numpy(np.array(np.float32(how_time_long))[np.newaxis])
         spar_arr = torch.from_numpy(np.array(np.float32(spar_arr)))
-        spar_arr_with_time = torch.concat([how_time_long, spar_arr], dim=0)
-        
-        baseline = torch.concat([baseline, mask, lens_in],dim=2)
+        spar_arr_with_time = torch.cat([how_time_long, spar_arr], dim=0)
+        baseline = torch.cat([baseline, mask, lens_in],dim=2)
           
         sixmonths = sixmonths.permute(2,0,1)
         baseline = baseline.permute(2,0,1)
@@ -436,4 +434,4 @@ def get_training_data(rgb_dir, txt, len_mode='origin'):
 def get_validation_data(rgb_dir, txt, len_mode='origin'):
     assert os.path.exists(rgb_dir)
     return Dataset_eye(rgb_dir, txt, 'val', len_mode)
-        
+
